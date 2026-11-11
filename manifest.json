@@ -1,0 +1,11 @@
+{
+  "name": "ระบบแจ้งซ่อมบำรุง",
+  "short_name": "แจ้งซ่อม",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F3FAF7",
+  "theme_color": "#12B886",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
