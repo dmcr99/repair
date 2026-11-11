@@ -326,3 +326,8 @@ h1,h2,h3{line-height:1.45}
 .hcard small,.item .loc span{line-height:1.6;padding-top:.12em}
 .item .ds{line-height:1.6;padding-top:.15em}
 .mapcard b{line-height:1.6;padding-top:.15em}
+
+/* ---------- organization name ---------- */
+.landing .org{display:flex;gap:10px;align-items:flex-start;margin:0;padding:12px 14px;border-radius:18px;background:rgba(255,255,255,.7);border:1.5px solid #fff;box-shadow:var(--shadow);color:var(--brand-d);font-family:var(--f-display);font-weight:600;font-size:16.5px;line-height:1.55;max-width:34ch}
+.landing .org svg{flex:none;margin-top:3px;color:var(--brand)}
+nav.bottom .brandrow small{display:block;font-family:var(--f-body);font-weight:500;font-size:12px;line-height:1.5;color:var(--muted);margin-top:2px}
