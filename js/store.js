@@ -17,20 +17,38 @@ const Store = (() => {
     const url = p => sb.storage.from('photos').getPublicUrl(p).data.publicUrl;
     return {
       async fetchAll() {
+        // ดึงทีละหน้า เพราะ Supabase ส่งได้ไม่เกิน 1000 แถวต่อคำขอ
+        const allDefects = async () => {
+          const out = [], N = 500;
+          for (let from = 0; ; from += N) {
+            const page = ok(await sb.from('defects').select('*, photos(*), events(*)').order('id').range(from, from + N - 1));
+            out.push(...page);
+            if (page.length < N) return out;
+          }
+        };
         const [p, c, d, s] = await Promise.all([
           sb.from('places').select('*').eq('active', true).order('name'),
           sb.from('categories').select('*').eq('active', true).order('sort').order('id'),
-          sb.from('defects').select('*, photos(*), events(*)'),
+          allDefects(),
           sb.from('app_public').select('*')
         ]);
         return {
           places: ok(p), cats: ok(c),
-          defects: ok(d).map(x => ({ ...x, photos: (x.photos || []).map(ph => ({ ...ph, url: url(ph.path) })), events: x.events || [] })),
+          defects: d.map(x => ({ ...x, photos: (x.photos || []).map(ph => ({ ...ph, url: url(ph.path) })), events: x.events || [] })),
           settings: Object.fromEntries(ok(s).map(r => [r.key, r.value]))
         };
       },
       async insertDefect(row) { return ok(await sb.from('defects').insert(row).select('id').single()).id; },
-      async patchDefect(id, patch) { ok(await sb.from('defects').update(patch).eq('id', id)); },
+      async checkStatus(id, expect) {
+        const r = ok(await sb.from('defects').select('status').eq('id', id).maybeSingle());
+        if (!r || r.status !== expect) throw new Error('STALE_STATUS');
+      },
+      async patchDefect(id, patch, expect) {
+        let q = sb.from('defects').update(patch).eq('id', id);
+        if (expect) q = q.eq('status', expect);
+        const r = ok(await q.select('id'));
+        if (!r.length) throw new Error('STALE_STATUS');
+      },
       async addPhoto(defectId, kind, blob) {
         const path = `${defectId}/${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
         ok(await sb.storage.from('photos').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' }));
@@ -77,7 +95,12 @@ const Store = (() => {
         db.defects.push({ id, description: '', place_id: null, sub_location: '', category_id: null, urgency: 'normal', status: 'new', note: '', lat: null, lng: null, reporter_name: '', tech_name: '', created_at: now(), updated_at: now(), closed_at: null, ...row });
         await save(); return id;
       },
-      async patchDefect(id, patch) { await load(); Object.assign(db.defects.find(d => d.id === id), patch); await save(); },
+      async checkStatus(id, expect) { await load(); const d = db.defects.find(x => x.id === id); if (!d || d.status !== expect) throw new Error('STALE_STATUS'); },
+      async patchDefect(id, patch, expect) {
+        await load(); const d = db.defects.find(x => x.id === id);
+        if (!d || (expect && d.status !== expect)) throw new Error('STALE_STATUS');
+        Object.assign(d, patch); await save();
+      },
       async addPhoto(defectId, kind, blob) { await load(); db.photos.push({ id: nid(), defect_id: defectId, kind, path: '', url: await toDataUrl(blob), created_at: now() }); await save(); },
       async addEvent(row) { await load(); db.events.push({ id: nid(), created_at: now(), ...row }); await save(); },
       async rpc(name, a) {
@@ -111,15 +134,34 @@ const Store = (() => {
   }
 
   /* ---------- ส่วนที่ใช้ร่วมกัน ---------- */
-  async function reload() {
-    const d = await be.fetchAll();
-    d.defects.forEach(x => {
-      x.photos.sort((a, b) => a.id - b.id);
-      x.events.sort((a, b) => new Date(a.created_at) - new Date(b.created_at) || a.id - b.id);
-    });
-    d.defects.sort((a, b) => b.id - a.id);
-    Object.assign(state, d, { loaded: true, error: null });
-    emit();
+  let inflight = null;
+  function reload() {
+    const p = (async () => {
+      const d = await be.fetchAll();
+      d.defects.forEach(x => {
+        x.photos.sort((a, b) => a.id - b.id);
+        x.events.sort((a, b) => new Date(a.created_at) - new Date(b.created_at) || a.id - b.id);
+      });
+      d.defects.sort((a, b) => b.id - a.id);
+      Object.assign(state, d, { loaded: true, error: null });
+      emit();
+    })();
+    inflight = p;
+    p.then(() => {}, () => {}).then(() => { if (inflight === p) inflight = null; });
+    return p;
+  }
+
+  // การเปลี่ยนแปลงที่เครื่องนี้มีข้อมูลอยู่แล้ว (เช่น เป็นคนบันทึกเอง) ไม่ต้องโหลดใหม่ซ้ำ
+  const sameTime = (a, b) => a != null && b != null && new Date(a).getTime() === new Date(b).getTime();
+  function isKnown(p) {
+    const n = p.new || {}, ds = state.defects;
+    if (p.eventType === 'INSERT' && p.table === 'events') return ds.some(d => d.events.some(e => e.id === n.id));
+    if (p.eventType === 'INSERT' && p.table === 'photos') return ds.some(d => d.photos.some(x => x.id === n.id));
+    if (p.eventType !== 'DELETE' && p.table === 'defects') {
+      const d = ds.find(x => x.id === n.id);
+      return !!d && !n.deleted_at && d.status === n.status && sameTime(d.updated_at, n.updated_at);
+    }
+    return false;
   }
 
   async function init() {
@@ -127,28 +169,48 @@ const Store = (() => {
     be = cloud ? cloudBackend() : localBackend();
     try { await reload(); } catch (e) { state.error = e.message; state.loaded = true; emit(); }
     if (be.listen) {
-      let t; be.listen(() => { clearTimeout(t); t = setTimeout(() => reload().catch(() => {}), 500); });
+      let t, pend = [];
+      be.listen(p => {
+        pend.push(p); clearTimeout(t);
+        t = setTimeout(async () => {
+          if (inflight) await inflight.catch(() => {});
+          const need = pend.some(x => !isKnown(x)); pend = [];
+          if (need) reload().catch(() => {});
+        }, 800);
+      });
     }
     document.addEventListener('visibilitychange', () => { if (!document.hidden && be) reload().catch(() => {}); });
   }
 
-  async function createDefect(row, blobs, actor, opt = {}) {
-    const id = await be.insertDefect(row);
-    for (const b of blobs) await be.addPhoto(id, 'before', b);
-    await be.addEvent({ defect_id: id, status: 'new', text: opt.eventText || 'แจ้งรายการ', actor, role: 'reporter' });
+  /* photos: Blob หรือ { blob } — ถ้าเป็น object จะจำว่ารูปไหนอัปโหลดแล้ว
+     prog: object ที่จำ id ของรายการที่สร้างแล้ว เพื่อให้กดส่งซ้ำหลังเน็ตหลุดโดยไม่เกิดรายการซ้ำ */
+  async function createDefect(row, photos, actor, opt = {}) {
+    const prog = opt.progress || {};
+    if (!prog.id) prog.id = await be.insertDefect(row);
+    for (const ph of photos) {
+      if (ph.done) continue;
+      await be.addPhoto(prog.id, 'before', ph.blob || ph);
+      if (!(ph instanceof Blob)) ph.done = true;
+    }
+    if (!prog.evented) {
+      await be.addEvent({ defect_id: prog.id, status: 'new', text: opt.eventText || 'แจ้งรายการ', actor, role: 'reporter' });
+      prog.evented = true;
+    }
     if (!opt.silent) await reload();
-    return id;
+    return prog.id;
   }
 
-  async function transition(id, patch, ev, blobs = []) {
+  // expect = สถานะที่ผู้ใช้เห็นตอนกด ถ้าในฐานข้อมูลเปลี่ยนไปแล้วจะไม่บันทึกทับ
+  async function transition(id, patch, ev, blobs = [], expect) {
+    if (expect && blobs.length) await be.checkStatus(id, expect);
     for (const b of blobs) await be.addPhoto(id, 'after', b);
-    await be.patchDefect(id, { ...patch, updated_at: new Date().toISOString() });
+    await be.patchDefect(id, { ...patch, updated_at: new Date().toISOString() }, expect);
     await be.addEvent({ defect_id: id, ...ev });
     await reload();
   }
 
-  async function addPhotos(id, kind, blobs) { for (const b of blobs) await be.addPhoto(id, kind, b); await reload(); }
-  async function addEvent(row) { await be.addEvent(row); await reload(); }
+  async function addPhotos(id, kind, blobs, opt = {}) { for (const b of blobs) await be.addPhoto(id, kind, b); if (!opt.silent) await reload(); }
+  async function addEvent(row, opt = {}) { await be.addEvent(row); if (!opt.silent) await reload(); }
 
   async function admin(name, args, opt = {}) {
     const r = await be.rpc(name, args);

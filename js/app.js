@@ -9,7 +9,6 @@ const SS = { get(k) { try { return sessionStorage.getItem(k) || ''; } catch (e) 
 
 const ST = { new: { t: 'รอซ่อม', c: '#EF4444' }, doing: { t: 'กำลังซ่อม', c: '#E8920B' }, review: { t: 'รอตรวจรับ', c: '#3B82F6' }, done: { t: 'เสร็จแล้ว', c: '#10A572' } };
 const ORDER = ['new', 'doing', 'review', 'done'];
-const URG = { normal: 'ปกติ', soon: 'ภายในสัปดาห์', urgent: 'ด่วน' };
 
 const S = {
   role: LS.get('role'), pin: SS.get('pin'),
@@ -61,7 +60,6 @@ const after = d => d.photos.filter(p => p.kind === 'after');
 const fmtDate = v => v ? new Date(v).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' }) : '-';
 const fmtTime = v => new Date(v).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
 const pill = s => `<span class="pill s-${s}">${ST[s].t}</span>`;
-const urgentPill = d => d.urgency === 'urgent' && d.status !== 'done' ? '<span class="pill urgent">ด่วน</span>' : '';
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function toast(text, bad) {
@@ -75,6 +73,7 @@ function errText(e) {
   const m = (e && e.message) || String(e);
   if (/INVALID_PIN/.test(m)) return 'รหัสผู้ดูแลไม่ถูกต้อง';
   if (/PIN_TOO_SHORT/.test(m)) return 'รหัสใหม่ต้องมีอย่างน้อย 4 ตัว';
+  if (/STALE_STATUS/.test(m)) return 'รายการนี้ถูกเปลี่ยนสถานะไปแล้ว หน้าจอแสดงข้อมูลล่าสุดให้แล้ว';
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'เชื่อมต่ออินเทอร์เน็ตไม่ได้ ลองใหม่อีกครั้ง';
   return 'ไม่สำเร็จ: ' + m;
 }
@@ -86,20 +85,33 @@ async function busy(btn, fn) {
   catch (e) {
     console.error(e);
     if (/INVALID_PIN/.test(e.message || '')) { S.pin = ''; SS.set('pin', ''); }
+    if (/STALE_STATUS/.test(e.message || '')) { closeSheet(); Store.reload().catch(() => {}); }
     toast(errText(e), true);
   }
   finally { if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = old; } }
 }
 async function compress(file, max = 1600, q = 0.82) {
-  let bmp;
-  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
-  catch (e) { bmp = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+  const bmp = await decodeImage(file);
   const w0 = bmp.width, h0 = bmp.height, k = Math.min(1, max / Math.max(w0, h0));
   const c = document.createElement('canvas');
   c.width = Math.round(w0 * k); c.height = Math.round(h0 * k);
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return new Promise(res => c.toBlob(res, 'image/jpeg', q));
+  if (bmp.close) bmp.close();
+  const out = await new Promise(res => c.toBlob(res, 'image/jpeg', q));
+  c.width = c.height = 0;
+  return out;
 }
+// ถอดรหัสรูป แล้วคืนหน่วยความจำส่วนที่ไม่ใช้แล้ว (ใช้ร่วมกับ exportdocx.js)
+async function decodeImage(blob) {
+  try { return await createImageBitmap(blob, { imageOrientation: 'from-image' }); }
+  catch (e) {
+    const u = URL.createObjectURL(blob);
+    try { return await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = u; }); }
+    finally { URL.revokeObjectURL(u); }
+  }
+}
+// คืนหน่วยความจำของรูปตัวอย่างที่ไม่ใช้แล้ว
+function freePhotos(arr) { (arr || []).forEach(p => { if (p && p.url && p.url.startsWith('blob:')) URL.revokeObjectURL(p.url); }); }
 async function filesToPhotos(files) {
   const out = [];
   for (const f of files) {
@@ -180,7 +192,7 @@ function itemRow(d) {
   const b = before(d);
   return `<button class="item" data-act="open" data-id="${d.id}">
     <span class="ph">${b[0] ? `<img src="${esc(b[0].url)}" alt="" loading="lazy">` : ic('img', 26, 1.6)}${d.photos.length > 1 ? `<span class="cnt">${d.photos.length} รูป</span>` : ''}</span>
-    <span class="bd"><span class="row"><span class="no">${no(d.id)}</span>${pill(d.status)}${urgentPill(d)}</span>
+    <span class="bd"><span class="row"><span class="no">${no(d.id)}</span>${pill(d.status)}</span>
       <span class="ds">${esc(d.description)}</span>
       <span class="row loc">${ic('pin', 14)}<span>${esc(placeLabel(d))}</span></span></span></button>`;
 }
@@ -216,20 +228,17 @@ VIEWS.home = {
     const all = Store.state.defects, cnt = s => all.filter(d => d.status === s).length;
     const total = all.length, pct = total ? Math.round(cnt('done') / total * 100) : 0, C = 2 * Math.PI * 38;
     const tech = S.role === 'tech';
-    const urgent = all.filter(d => d.urgency === 'urgent' && d.status !== 'done');
     const mine = all.filter(d => tech ? (d.status === 'new' || d.status === 'doing') : d.status === 'review');
     const open = cnt('new') + cnt('doing');
     return head('ภาพรวม',new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long' })) + `<main class="screen">
       ${demoBanner()}
       <div class="hero"><div>
-        ${tech ? `<h2>${open ? `มีงานรอซ่อม ${open} รายการ` : 'ไม่มีงานค้าง เยี่ยมมาก'}</h2><p>${urgent.length ? `เร่งด่วน ${urgent.length} รายการ` : 'ไม่มีงานเร่งด่วน'} · รอตรวจรับ ${cnt('review')} รายการ</p><button class="cta" data-act="go" data-to="list" data-f="new">${ic('wrench', 18)} ดูงานที่ต้องทำ</button>`
+        ${tech ? `<h2>${open ? `มีงานรอซ่อม ${open} รายการ` : 'ไม่มีงานค้าง เยี่ยมมาก'}</h2><p>กำลังซ่อม ${cnt('doing')} รายการ · รอตรวจรับ ${cnt('review')} รายการ</p><button class="cta" data-act="go" data-to="list" data-f="new">${ic('wrench', 18)} ดูงานที่ต้องทำ</button>`
           : `<h2>เจอจุดชำรุด? แจ้งได้ในไม่ถึงนาที</h2><p>ถ่ายรูป เลือกสถานที่ ปักหมุด แล้วส่งให้ช่าง</p><button class="cta" data-act="go" data-to="new">${ic('cam', 18)} แจ้งรายการใหม่</button>`}
         </div>
         <div class="ring" title="งานที่เสร็จแล้ว"><svg viewBox="0 0 92 92"><circle class="bg" cx="46" cy="46" r="38"/><circle class="fg" cx="46" cy="46" r="38" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${C.toFixed(1)}" data-off="${(C * (1 - pct / 100)).toFixed(1)}"/></svg><div><b><span data-count="${pct}">0</span>%</b><small>เสร็จแล้ว</small></div></div>
       </div>
       <div class="stats">${ORDER.map(k => `<button class="stat s-${k}" data-act="go" data-to="list" data-f="${k}"><b data-count="${cnt(k)}">0</b><span>${ST[k].t}</span></button>`).join('')}</div>
-      ${urgent.length ? `<div class="sec-h"><h2>เร่งด่วน</h2><span class="muted">${urgent.length} รายการ</span></div>
-        <div class="hscroll">${urgent.map(d => `<button class="hcard" data-act="open" data-id="${d.id}">${before(d)[0] ? `<img src="${esc(before(d)[0].url)}" alt="" loading="lazy">` : ''}<span class="in">${pill(d.status)}<b>${esc(d.description)}</b><small>${esc(placeLabel(d))}</small></span></button>`).join('')}</div>` : ''}
       <div class="sec-h"><h2>${tech ? 'งานที่ต้องทำ' : 'รอตรวจรับ'}</h2>${mine.length > 3 ? `<button class="link" data-act="go" data-to="list" data-f="${tech ? 'new' : 'review'}">ดูทั้งหมด ${ic('chev', 15, 2.4)}</button>` : ''}</div>
       ${mine.length ? `<div class="items">${mine.slice(0, 3).map(itemRow).join('')}</div>` : `<div class="empty">${ic('check', 28, 2.4)}<b>${tech ? 'ไม่มีงานค้าง' : 'ไม่มีงานรอตรวจรับ'}</b><span>${tech ? 'เมื่อมีการแจ้งรายการใหม่จะแสดงที่นี่' : 'เมื่อช่างแก้ไขเสร็จ รายการจะแสดงที่นี่ให้ตรวจรับ'}</span></div>`}
       <div class="sec-h"><h2>แจ้งล่าสุด</h2>${total > 4 ? `<button class="link" data-act="go" data-to="list" data-f="all">ดูทั้งหมด ${ic('chev', 15, 2.4)}</button>` : ''}</div>
@@ -242,7 +251,7 @@ function filtered() {
   const f = S.filter, q = f.q.trim().toLowerCase();
   return Store.state.defects.filter(d => (f.status === 'all' || d.status === f.status) && (!f.place || d.place_id == f.place) && (!f.cat || d.category_id == f.cat) &&
     (!q || (d.description + ' ' + placeLabel(d) + ' ' + no(d.id)).toLowerCase().includes(q)))
-    .sort((a, b) => (b.urgency === 'urgent' && b.status !== 'done') - (a.urgency === 'urgent' && a.status !== 'done') || b.id - a.id);
+    .sort((a, b) => b.id - a.id);
 }
 function drawList() {
   const arr = filtered(), el = $('#results'); if (!el) return;
@@ -272,14 +281,14 @@ function drawPins() {
   mapCtx.layer.clearLayers();
   const arr = Store.state.defects.filter(d => d.lat != null && (S.mapF === 'all' || d.status === S.mapF));
   arr.forEach(d => {
-    const cls = (S.mapSel === d.id ? 'sel ' : '') + (d.urgency === 'urgent' && d.status !== 'done' ? 'pulse' : '');
+    const cls = S.mapSel === d.id ? 'sel' : '';
     L.marker([d.lat, d.lng], { icon: pinIcon(ST[d.status].c, cls), zIndexOffset: S.mapSel === d.id ? 1000 : 0 })
       .on('click', () => { S.mapSel = d.id; drawPins(); }).addTo(mapCtx.layer);
   });
   const sel = S.mapSel ? byId(S.mapSel) : null, box = $('#mapcard'), nopin = Store.state.defects.filter(d => d.lat == null).length;
   if (!box) return;
   box.innerHTML = (sel ? `<button class="mapcard" data-act="open" data-id="${sel.id}">${before(sel)[0] ? `<img src="${esc(before(sel)[0].url)}" alt="">` : `<span class="noimg">${ic('img', 24, 1.6)}</span>`}
-      <span style="min-width:0;display:flex;flex-direction:column;gap:4px"><span style="display:flex;gap:6px;align-items:center;font-size:12.5px" class="muted">${no(sel.id)} ${pill(sel.status)}${urgentPill(sel)}</span><b>${esc(sel.description)}</b><small class="muted">${esc(placeLabel(sel))}</small></span>${ic('chev', 20, 2.4)}</button>`
+      <span style="min-width:0;display:flex;flex-direction:column;gap:4px"><span style="display:flex;gap:6px;align-items:center;font-size:12.5px" class="muted">${no(sel.id)} ${pill(sel.status)}</span><b>${esc(sel.description)}</b><small class="muted">${esc(placeLabel(sel))}</small></span>${ic('chev', 20, 2.4)}</button>`
     : `<span class="mapnote">${arr.length ? `แตะหมุดเพื่อดูรายละเอียด · ${arr.length} หมุด` : 'ยังไม่มีหมุดบนแผนที่'}${nopin ? ` · ยังไม่ปักหมุด ${nopin} รายการ` : ''}</span>`)
     + (isAdmin() ? `<button class="btn ghost" style="align-self:flex-start;padding:8px 12px;font-size:13.5px;border-radius:12px" data-act="savecenter">${ic('pin', 16)} ตั้งมุมมองนี้เป็นค่าเริ่มต้น</button>` : '');
 }
@@ -302,8 +311,8 @@ VIEWS.map = {
 
 /* ----- form (new / edit) ----- */
 function newDraft(d) {
-  return d ? { editId: d.id, photos: [], place_id: d.place_id ?? '', sub: d.sub_location, cat_id: d.category_id ?? '', urgency: d.urgency, desc: d.description, name: d.reporter_name, lat: d.lat, lng: d.lng, pinned: d.lat != null, status: d.status, note: d.note }
-    : { editId: null, photos: [], place_id: '', sub: '', cat_id: '', urgency: 'normal', desc: '', name: LS.get('name_reporter'), lat: null, lng: null, pinned: false };
+  return d ? { editId: d.id, photos: [], place_id: d.place_id ?? '', sub: d.sub_location, cat_id: d.category_id ?? '', desc: d.description, name: d.reporter_name, lat: d.lat, lng: d.lng, pinned: d.lat != null, status: d.status, note: d.note }
+    : { editId: null, photos: [], place_id: '', sub: '', cat_id: '', desc: '', name: LS.get('name_reporter'), lat: null, lng: null, pinned: false };
 }
 function drawFormPhotos() {
   const d = S.draft, el = $('#f-photos'); if (!el) return;
@@ -339,9 +348,8 @@ function formView(edit) {
           <input class="input" data-k="sub" value="${esc(d.sub)}" placeholder="จุดย่อย เช่น ชั้น 2, ห้องควบคุม (ไม่บังคับ)" aria-label="จุดย่อย">
           <div class="maptools"><button type="button" class="chip" data-act="gps">${ic('gps', 16)} ใช้ตำแหน่งปัจจุบัน</button><span class="hint" id="f-pinhint">${d.lat != null ? 'ปักหมุดแล้ว ลากหมุดเพื่อปรับตำแหน่งได้' : 'หรือแตะบนแผนที่เพื่อปักหมุด'}</span></div>
           <div class="fmap" id="f-map"></div></section>
-        <section class="fsec"><h3><b>3</b>หมวดหมู่และความเร่งด่วน</h3>
-          <div class="chipwrap">${Store.state.cats.map(c => `<button type="button" class="chip" data-act="fcat" data-c="${c.id}" aria-pressed="${d.cat_id == c.id}">${esc(c.name)}</button>`).join('')}</div>
-          <div class="seg" role="group" aria-label="ความเร่งด่วน">${Object.entries(URG).map(([k, t]) => `<button type="button" data-act="furg" data-u="${k}" aria-pressed="${d.urgency === k}">${t}</button>`).join('')}</div></section>
+        <section class="fsec"><h3><b>3</b>หมวดหมู่</h3>
+          <div class="chipwrap">${Store.state.cats.map(c => `<button type="button" class="chip" data-act="fcat" data-c="${c.id}" aria-pressed="${d.cat_id == c.id}">${esc(c.name)}</button>`).join('')}</div></section>
         <section class="fsec"><h3><b>4</b>อาการที่พบ</h3>
           <textarea class="input" data-k="desc" placeholder="เช่น น้ำรั่วออกจากปั๊ม มีน้ำนองพื้น" aria-label="อาการที่พบ">${esc(d.desc)}</textarea>
           <div class="field"><label for="f-name">ชื่อผู้แจ้ง</label><input class="input" id="f-name" data-k="name" value="${esc(d.name)}" placeholder="ชื่อ-นามสกุล หรือชื่อเล่น" autocomplete="name"><span class="hint">จำไว้ในเครื่องนี้ ครั้งต่อไปไม่ต้องพิมพ์ใหม่</span></div>
@@ -374,17 +382,20 @@ async function submitForm(btn) {
   const p = place(d.place_id);
   let lat = d.lat, lng = d.lng;
   if (lat == null && p && p.lat != null) { lat = p.lat; lng = p.lng; }
-  const row = { description: d.desc.trim(), place_id: d.place_id ? +d.place_id : null, sub_location: d.sub.trim(), category_id: d.cat_id ? +d.cat_id : null, urgency: d.urgency, lat, lng, reporter_name: d.name.trim() };
+  const row = { description: d.desc.trim(), place_id: d.place_id ? +d.place_id : null, sub_location: d.sub.trim(), category_id: d.cat_id ? +d.cat_id : null, lat, lng, reporter_name: d.name.trim() };
   await busy(btn, async () => {
     if (d.editId) {
       await Store.admin('update_defect', { p_pin: S.pin, p_id: d.editId, p_data: { ...row, status: d.status, note: d.note || '' } }, { silent: true });
-      if (d.photos.length) await Store.addPhotos(d.editId, 'before', d.photos.map(x => x.blob));
+      const fresh = d.photos.filter(x => !x.done);
+      for (const x of fresh) { await Store.addPhotos(d.editId, 'before', [x.blob], { silent: true }); x.done = true; }
       await Store.addEvent({ defect_id: d.editId, status: d.status, text: 'ผู้ดูแลแก้ไขข้อมูลรายการ', actor: 'ผู้ดูแลระบบ', role: 'admin' });
-      const id = d.editId; S.draft = null; toast('บันทึกแล้ว'); go('d/' + id, true);
+      const id = d.editId; freePhotos(d.photos); S.draft = null; toast('บันทึกแล้ว'); go('d/' + id, true);
     } else {
       if (row.reporter_name) LS.set('name_reporter', row.reporter_name);
-      const id = await Store.createDefect(row, d.photos.map(x => x.blob), row.reporter_name || 'ไม่ระบุชื่อ');
-      S.draft = null; toast('ส่งรายการแล้ว ช่างเห็นได้ทันที'); go('d/' + id, true);
+      // จำ id ไว้ในฉบับร่าง ถ้าเน็ตหลุดระหว่างอัปโหลดรูป กดส่งอีกครั้งจะอัปโหลดต่อ ไม่สร้างรายการซ้ำ
+      d.progress = d.progress || {};
+      const id = await Store.createDefect(row, d.photos, row.reporter_name || 'ไม่ระบุชื่อ', { progress: d.progress });
+      freePhotos(d.photos); S.draft = null; toast('ส่งรายการแล้ว ช่างเห็นได้ทันที'); go('d/' + id, true);
     }
   });
 }
@@ -405,7 +416,7 @@ VIEWS.detail = {
     return head(`รายการ ${no(d.id)}`, 'แจ้งเมื่อ ' + fmtDate(d.created_at), true) + `<main class="screen narrow">
       <div class="gallery ${b.length > 1 ? 'multi' : ''}">${b.length ? b.map(p => `<button data-act="zoom" data-src="${esc(p.url)}" aria-label="ขยายรูป"><img src="${esc(p.url)}" alt="รูปจุดชำรุด"></button>`).join('') : `<div class="none">${ic('img', 40, 1.4)}</div>`}</div>
       <div class="stepper" aria-label="สถานะ ${ST[d.status].t}">${ORDER.map((s, i) => `<div class="step ${i <= idx ? 'on' : ''} ${i === idx ? 'cur' : ''}"><i>${i <= idx ? ic('check', 14, 3.2) : ''}</i>${ST[s].t}</div>`).join('')}</div>
-      <div class="dtitle"><div style="display:flex;gap:6px;flex-wrap:wrap">${pill(d.status)}${urgentPill(d)}${c ? `<span class="tag">${esc(c.name)}</span>` : ''}${d.urgency === 'soon' ? '<span class="tag">ภายในสัปดาห์</span>' : ''}</div>
+      <div class="dtitle"><div style="display:flex;gap:6px;flex-wrap:wrap">${pill(d.status)}${c ? `<span class="tag">${esc(c.name)}</span>` : ''}</div>
         <h2>${esc(d.description)}</h2>${d.note ? `<div class="dnote">${esc(d.note)}</div>` : ''}</div>
       ${acts ? `<div class="actions">${acts}</div>` : ''}${wait ? `<div class="wait">${ic('clock', 20)}${wait}</div>` : ''}
       <dl class="kv card"><dt>${ic('pin', 16)}สถานที่</dt><dd>${esc(placeLabel(d))}</dd><dt>${ic('user', 16)}ผู้แจ้ง</dt><dd>${esc(d.reporter_name || 'ไม่ระบุชื่อ')}</dd><dt>${ic('wrench', 16)}ช่าง</dt><dd>${d.tech_name ? esc(d.tech_name) : '<span class="muted">ยังไม่มีผู้รับงาน</span>'}</dd>${d.closed_at ? `<dt>${ic('check', 16)}ปิดงาน</dt><dd>${fmtDate(d.closed_at)}</dd>` : ''}</dl>
@@ -511,7 +522,10 @@ function render(nav) {
     }
     if (nav) scrollTo(0, 0);
   };
-  if (nav && document.startViewTransition && !reduced()) document.startViewTransition(paint); else paint();
+  if (nav && document.startViewTransition && !reduced()) {
+    const vt = document.startViewTransition(paint);
+    [vt.ready, vt.finished, vt.updateCallbackDone].forEach(p => p && p.catch(() => {}));   // กดเปลี่ยนหน้าเร็ว ๆ ไม่ต้องแจ้งข้อผิดพลาด
+  } else paint();
 }
 window.addEventListener('hashchange', () => { closeSheet(); render(true); });
 Store.subscribe(() => {
@@ -526,7 +540,7 @@ function sheet(html, opt = {}) {
   $('#layer').innerHTML = `<div class="scrim" ${opt.lock ? 'data-lock="1"' : ''}><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div></div>`;
   const f = $('#layer [autofocus]'); if (f) setTimeout(() => f.focus(), 60);
 }
-function closeSheet() { if (sheetMap) { try { sheetMap.remove(); } catch (e) {} sheetMap = null; } $('#layer').innerHTML = ''; S.actPhotos = []; }
+function closeSheet() { if (sheetMap) { try { sheetMap.remove(); } catch (e) {} sheetMap = null; } $('#layer').innerHTML = ''; freePhotos(S.actPhotos); S.actPhotos = []; }
 function nameField(role) { return `<div class="field"><label for="a-name">ชื่อของคุณ</label><input class="input" id="a-name" value="${esc(LS.get('name_' + role))}" placeholder="ชื่อ-นามสกุล หรือชื่อเล่น" autocomplete="name"></div>`; }
 function drawActPhotos() {
   const el = $('#a-photos'); if (!el) return;
@@ -559,11 +573,13 @@ async function doAct(kind, btn) {
   const ev = (status, t) => ({ status, text: t, actor: name, role: a.role });
   const blobs = S.actPhotos.map(p => p.blob);
   await busy(btn, async () => {
-    if (kind === 'accept') await Store.transition(id, { status: 'doing', tech_name: name }, ev('doing', 'รับงาน เริ่มดำเนินการ'));
-    if (kind === 'partial') await Store.transition(id, { note: text }, ev('doing', 'ความคืบหน้า: ' + text));
-    if (kind === 'fixed') await Store.transition(id, { status: 'review', tech_name: name, note: '' }, ev('review', 'แจ้งแก้ไขเสร็จ' + (text ? ': ' + text : '')), blobs);
-    if (kind === 'approve') await Store.transition(id, { status: 'done', closed_at: new Date().toISOString() }, ev('done', 'ตรวจรับงาน ปิดรายการ'));
-    if (kind === 'reject') await Store.transition(id, { status: 'doing', note: 'ตีกลับ: ' + text }, ev('new', 'ตีกลับ: ' + text));
+    // ส่งสถานะที่เห็นอยู่ไปด้วย ถ้ามีคนเปลี่ยนไปก่อนแล้วจะไม่บันทึกทับ
+    const was = d.status;
+    if (kind === 'accept') await Store.transition(id, { status: 'doing', tech_name: name }, ev('doing', 'รับงาน เริ่มดำเนินการ'), [], was);
+    if (kind === 'partial') await Store.transition(id, { note: text }, ev('doing', 'ความคืบหน้า: ' + text), [], was);
+    if (kind === 'fixed') await Store.transition(id, { status: 'review', tech_name: name, note: '' }, ev('review', 'แจ้งแก้ไขเสร็จ' + (text ? ': ' + text : '')), blobs, was);
+    if (kind === 'approve') await Store.transition(id, { status: 'done', closed_at: new Date().toISOString() }, ev('done', 'ตรวจรับงาน ปิดรายการ'), [], was);
+    if (kind === 'reject') await Store.transition(id, { status: 'doing', note: 'ตีกลับ: ' + text }, ev('new', 'ตีกลับ: ' + text), [], was);
     closeSheet();
     toast({ accept: 'รับงานแล้ว', partial: 'บันทึกแล้ว', fixed: 'ส่งให้ผู้แจ้งตรวจรับแล้ว', approve: 'ปิดงานเรียบร้อย', reject: 'ตีกลับให้ช่างแล้ว' }[kind]);
     if (kind === 'approve') confetti();
@@ -634,7 +650,7 @@ const ACT = {
   pin() { pinSheet(); },
   rolesheet() { roleSheet(); },
   adminout() { S.pin = ''; SS.set('pin', ''); closeSheet(); toast('ออกจากโหมดผู้ดูแลแล้ว'); route().name === 'admin' || route().name === 'edit' ? go('home') : render(false); },
-  retry() { Store.state.loaded = false; render(false); Store.reload().catch(e => { Store.state.error = e.message; Store.state.loaded = true; render(false); }); },
+  retry() { location.reload(); },
   go(t) { if (t.dataset.f) S.filter.status = t.dataset.f; closeSheet(); go(t.dataset.to); },
   back() { history.length > 1 ? history.back() : go('home'); },
   open(t) { go('d/' + t.dataset.id); },
@@ -647,14 +663,13 @@ const ACT = {
   zoom(t) { const el = document.createElement('div'); el.className = 'lightbox'; el.innerHTML = `<img src="${esc(t.dataset.src)}" alt="รูปขยาย">`; el.onclick = () => el.remove(); document.body.appendChild(el); },
   /* form */
   fcat(t) { S.draft.cat_id = S.draft.cat_id == t.dataset.c ? '' : t.dataset.c; $$('[data-act="fcat"]').forEach(b => b.setAttribute('aria-pressed', b.dataset.c == S.draft.cat_id)); },
-  furg(t) { S.draft.urgency = t.dataset.u; $$('[data-act="furg"]').forEach(b => b.setAttribute('aria-pressed', b.dataset.u === S.draft.urgency)); },
   gps() { locate((la, ln) => { setFormPin(la, ln, true, true); toast('ปักหมุดตามตำแหน่งปัจจุบันแล้ว'); }); },
-  rmphoto(t) { S.draft.photos.splice(+t.dataset.i, 1); drawFormPhotos(); },
+  rmphoto(t) { freePhotos(S.draft.photos.splice(+t.dataset.i, 1)); drawFormPhotos(); },
   async delphoto(t) { await busy(null, async () => { await Store.admin('delete_photo', { p_pin: S.pin, p_id: +t.dataset.id }); drawFormPhotos(); toast('ลบรูปแล้ว'); }); },
   /* detail */
   act(t) { actSheet(t.dataset.kind); },
   doact(t) { doAct(t.dataset.kind, t); },
-  rmact(t) { S.actPhotos.splice(+t.dataset.i, 1); drawActPhotos(); },
+  rmact(t) { freePhotos(S.actPhotos.splice(+t.dataset.i, 1)); drawActPhotos(); },
   askdelete() { sheet(`<h2>ลบรายการนี้?</h2><p class="muted">รายการจะหายจากหน้าเว็บและรายงานทั้งหมด</p><button class="btn danger block lg" data-act="dodelete">ลบรายการ</button><button class="btn ghost block" data-act="closesheet">ยกเลิก</button>`); },
   async dodelete(t) { const id = cur.r.id; await busy(t, async () => { await Store.admin('delete_defect', { p_pin: S.pin, p_id: id }); closeSheet(); toast('ลบรายการแล้ว'); go('list', true); }); },
   closesheet() { closeSheet(); },
@@ -665,9 +680,11 @@ const ACT = {
     const arr = expList(); if (!arr.length) return;
     sheet(`<h2>กำลังสร้างไฟล์ Word</h2><p class="muted" id="imp-txt">เตรียมรูปภาพ…</p><div class="progress"><i id="imp-bar"></i></div>`, { lock: true });
     try {
-      await exportDocx(arr.map(d => ({ desc: expDesc(d), before: before(d).map(p => p.url), after: after(d).map(p => p.url), remark: expRemark(d) })),
+      const res = await exportDocx(arr.map(d => ({ desc: expDesc(d), before: before(d).map(p => p.url), after: after(d).map(p => p.url), remark: expRemark(d) })),
         { title: S.exp.title, after: S.exp.after }, (i, n) => { const b = $('#imp-bar'); if (b) { b.style.width = (i / n * 100) + '%'; $('#imp-txt').textContent = `เตรียมรูปภาพ ${i} จาก ${n} รายการ`; } });
-      closeSheet(); toast('ดาวน์โหลดไฟล์ Word แล้ว');
+      closeSheet();
+      if (res.failed) toast(`ดาวน์โหลดแล้ว แต่มีรูป ${res.failed} รูปโหลดไม่สำเร็จ ไม่ได้อยู่ในไฟล์ ลองส่งออกใหม่อีกครั้ง`, true);
+      else toast('ดาวน์โหลดไฟล์ Word แล้ว');
     } catch (e) { console.error(e); closeSheet(); toast(errText(e), true); }
   },
   /* admin */

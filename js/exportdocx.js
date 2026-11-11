@@ -10,17 +10,25 @@ function loadScript(src) {
 }
 
 // โหลดรูปแล้วย่อให้พอดีกับเอกสาร คืนค่า {buf, w, h}
+async function fetchBlob(url) {
+  let err;
+  for (let n = 0; n < 2; n++) {   // ลองซ้ำ 1 ครั้งถ้าเน็ตสะดุด
+    try { const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.blob(); }
+    catch (e) { err = e; }
+  }
+  throw err;
+}
 async function docxImage(url, max = 720) {
-  const blob = await (await fetch(url)).blob();
-  let bmp;
-  try { bmp = await createImageBitmap(blob); }
-  catch (e) { bmp = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(blob); }); }
+  const bmp = await decodeImage(await fetchBlob(url));
   const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  if (bmp.close) bmp.close();
   const out = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.8));
-  return { buf: await out.arrayBuffer(), w: c.width, h: c.height };
+  const res = { buf: await out.arrayBuffer(), w: c.width, h: c.height };
+  c.width = c.height = 0;
+  return res;
 }
 
 async function exportDocx(rows, opt, onProgress) {
@@ -45,15 +53,24 @@ async function exportDocx(rows, opt, onProgress) {
     children
   });
 
+  const stats = { failed: 0 };
+  // ใส่รูปครบทุกรูป: 1–2 รูปเรียงลงล่าง, 3 รูปขึ้นไปจัดเป็นตาราง 2 คอลัมน์ให้ไม่สูงเกิน
   async function imageParas(urls) {
-    const out = [];
-    for (const u of urls.slice(0, 3)) {
-      try {
-        const im = await docxImage(u);
-        let w = imgW, h = Math.round(im.h / im.w * w);
-        if (h > imgMaxH) { h = imgMaxH; w = Math.round(im.w / im.h * h); }
-        out.push(new D.Paragraph({ alignment: CENTER, spacing: { before: 40, after: 40 }, children: [new D.ImageRun({ data: im.buf, transformation: { width: w, height: h } })] }));
-      } catch (e) { console.warn('ข้ามรูปที่โหลดไม่ได้', u, e); }
+    const ims = [];
+    for (const u of urls) {
+      try { ims.push(await docxImage(u)); }
+      catch (e) { stats.failed++; console.warn('รูปโหลดไม่ได้', u, e); }
+    }
+    const grid = ims.length > 2, maxW = grid ? Math.floor((imgW - 8) / 2) : imgW, maxH = grid ? 150 : imgMaxH;
+    const runs = ims.map(im => {
+      let w = maxW, h = Math.round(im.h / im.w * w);
+      if (h > maxH) { h = maxH; w = Math.round(im.w / im.h * h); }
+      return new D.ImageRun({ data: im.buf, transformation: { width: w, height: h } });
+    });
+    const out = [], step = grid ? 2 : 1;
+    for (let i = 0; i < runs.length; i += step) {
+      const kids = runs.slice(i, i + step).flatMap((r, j) => j ? [new D.TextRun({ text: ' ' }), r] : [r]);
+      out.push(new D.Paragraph({ alignment: CENTER, spacing: { before: 40, after: 40 }, children: kids }));
     }
     return out;
   }
@@ -93,4 +110,5 @@ async function exportDocx(rows, opt, onProgress) {
   a.download = `${(opt.title || 'รายงานรายการชำรุด').replace(/[\\/:*?"<>|]/g, ' ').trim()} ${stamp}.docx`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  return stats;
 }
