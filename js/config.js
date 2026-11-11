@@ -5,5 +5,6 @@ window.APP_CONFIG = {
   SUPABASE_ANON_KEY: 'sb_publishable_i1WdSrKTQF16i1qu9JtWLw_pLwtNT8y',
 
   APP_NAME: 'ระบบแจ้งซ่อมบำรุง',
+  ORG_NAME: 'สวนพฤกษศาสตร์ป่าชายเลนนานาชาติ รัชกาลที่ ๙',
   REPORT_TITLE: 'แบบรายงานรายการชำรุดบกพร่อง'
 };

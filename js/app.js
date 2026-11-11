@@ -1,5 +1,6 @@
 /* ระบบแจ้งซ่อมบำรุง — ส่วนหน้าจอ */
-const CFG = Object.assign({ APP_NAME: 'ระบบแจ้งซ่อมบำรุง', REPORT_TITLE: 'แบบรายงานรายการชำรุดบกพร่อง' }, window.APP_CONFIG || {});
+const CFG = Object.assign({ APP_NAME: 'ระบบแจ้งซ่อมบำรุง', ORG_NAME: '', REPORT_TITLE: 'แบบรายงานรายการชำรุดบกพร่อง' }, window.APP_CONFIG || {});
+if (CFG.ORG_NAME) document.title = `${CFG.APP_NAME} · ${CFG.ORG_NAME}`;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -29,6 +30,7 @@ const PATHS = {
   cam: 'M4 8h3l2-3h6l2 3h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z',
   back: 'm15 18-6-6 6-6', chev: 'm9 18 6-6-6-6',
   wrench: 'M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.6-.6-.6-2.6z',
+  leaf: 'M5 19C5 10 11 4 20 4c0 9-6 15-15 15zM5 19l8-8',
   mega: 'M3 11v2a1 1 0 0 0 1 1h3l6 4V6L7 10H4a1 1 0 0 0-1 1zM17 9a4 4 0 0 1 0 6M19.5 6.5a8 8 0 0 1 0 11',
   lock: 'M6 11h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2zM8 11V7a4 4 0 0 1 8 0v4',
   gear: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.6a7 7 0 0 0-2 1.2l-2.3-.9-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.2l.4 2.6h4l.4-2.6a7 7 0 0 0 2-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z',
@@ -184,7 +186,7 @@ function itemRow(d) {
 }
 function navHtml(r) {
   const b = (to, icn, t) => `<button data-act="go" data-to="${to}" ${r.name === to ? 'aria-current="page"' : ''}>${ic(icn, 23)}<span>${t}</span></button>`;
-  return `<nav class="bottom" aria-label="เมนูหลัก"><div class="brandrow"><span class="logo">${ic('wrench', 24)}</span>${esc(CFG.APP_NAME)}</div>
+  return `<nav class="bottom" aria-label="เมนูหลัก"><div class="brandrow"><span class="logo">${ic('wrench', 24)}</span><span>${esc(CFG.APP_NAME)}${CFG.ORG_NAME ? `<small>${esc(CFG.ORG_NAME)}</small>` : ''}</span></div>
     ${b('home', 'home', 'หน้าแรก')}${b('list', 'list', 'รายการ')}
     <button class="fabbtn" data-act="go" data-to="new"><span class="fab">${ic('plus', 27, 2.6)}</span><span>แจ้งซ่อม</span></button>
     ${b('map', 'pin', 'แผนที่')}${b('export', 'doc', 'ส่งออก')}</nav>`;
@@ -198,7 +200,7 @@ VIEWS.landing = {
     return `<div class="landing screen">
       <div><div class="brand"><span class="logo">${ic('wrench', 25)}</span>${esc(CFG.APP_NAME)}</div>
       <h1>เจอจุดชำรุด<br><em>แจ้งได้ทันที</em></h1></div>
-      <p class="lead">ถ่ายรูป ปักหมุด ส่งถึงช่าง และติดตามได้จนงานเสร็จ</p>
+      ${CFG.ORG_NAME ? `<p class="org">${ic('leaf', 20)}<span>${esc(CFG.ORG_NAME)}</span></p>` : ''}
       ${demoBanner()}
       <div class="roles">
         <button class="rolecard" data-act="role" data-role="reporter"><span class="ic rep">${ic('mega', 30)}</span><span><h3>ผู้แจ้ง</h3><p>แจ้งจุดชำรุด และตรวจรับงานที่ช่างแก้แล้ว</p></span>${ic('chev', 22, 2.4)}</button>
