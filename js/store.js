@@ -56,6 +56,13 @@ const Store = (() => {
       },
       async addEvent(row) { ok(await sb.from('events').insert(row)); },
       async rpc(name, args) { return ok(await sb.rpc('admin_' + name, args)); },
+      // ลบไฟล์รูปที่อยู่ในถังขยะออกจากที่เก็บรูปจริง แล้วคืนจำนวนไฟล์ที่ลบได้
+      async purgeFiles(pin) {
+        const paths = ok(await sb.rpc('admin_trash_list', { p_pin: pin })) || [];
+        if (!paths.length) return 0;
+        for (let i = 0; i < paths.length; i += 100) ok(await sb.storage.from('photos').remove(paths.slice(i, i + 100)));
+        return ok(await sb.rpc('admin_trash_done', { p_pin: pin, p_paths: paths }));
+      },
       listen(cb) { sb.channel('all-changes').on('postgres_changes', { event: '*', schema: 'public' }, cb).subscribe(); }
     };
   }
@@ -218,7 +225,9 @@ const Store = (() => {
     return r;
   }
 
+  async function purgeFiles(pin) { return be && be.purgeFiles ? be.purgeFiles(pin) : 0; }
+
   async function resetDemo() { if (be.reset) { await be.reset(); await reload(); } }
 
-  return { state, init, reload, subscribe: f => subs.push(f), createDefect, transition, addPhotos, addEvent, admin, resetDemo };
+  return { state, init, reload, subscribe: f => subs.push(f), createDefect, transition, addPhotos, addEvent, admin, purgeFiles, resetDemo };
 })();

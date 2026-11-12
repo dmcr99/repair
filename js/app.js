@@ -111,6 +111,8 @@ async function decodeImage(blob) {
   }
 }
 // คืนหน่วยความจำของรูปตัวอย่างที่ไม่ใช้แล้ว
+// ลบไฟล์รูปที่เพิ่งลบออกจากที่เก็บรูปเบื้องหลัง ถ้าไม่สำเร็จ ไฟล์ยังอยู่ในถังขยะ กด "เก็บกวาดไฟล์รูป" ภายหลังได้
+function purgeQuiet() { Store.purgeFiles(S.pin).catch(e => console.warn('ลบไฟล์รูปไม่สำเร็จ', e)); }
 function freePhotos(arr) { (arr || []).forEach(p => { if (p && p.url && p.url.startsWith('blob:')) URL.revokeObjectURL(p.url); }); }
 async function filesToPhotos(files) {
   const out = [];
@@ -490,6 +492,7 @@ VIEWS.admin = {
       <div class="sec-h"><h2>ระบบ</h2></div>
       <div class="card">
         <button class="listrow" data-act="pinsheet"><span class="ico">${ic('lock', 19)}</span><span class="grow"><b>เปลี่ยนรหัสผู้ดูแล</b><small>ตัวเลขหรือตัวอักษร 4 ตัวขึ้นไป</small></span>${ic('chev', 18, 2.4)}</button>
+        ${Store.state.mode === 'cloud' ? `<button class="listrow" data-act="purge"><span class="ico">${ic('trash', 19)}</span><span class="grow"><b>เก็บกวาดไฟล์รูป</b><small>ลบไฟล์รูปที่ไม่ได้ใช้แล้วออกจากที่เก็บรูป เพื่อคืนพื้นที่</small></span>${ic('chev', 18, 2.4)}</button>` : ''}
         <label class="listrow" style="cursor:pointer"><span class="ico">${ic('upload', 19)}</span><span class="grow"><b>นำเข้ารายการจากรายงานเดิม</b><small>เลือกโฟลเดอร์ legacy-import (data.json และรูป)</small></span>${ic('chev', 18, 2.4)}<input id="imp" type="file" webkitdirectory multiple hidden></label>
         <button class="listrow" data-act="go" data-to="map"><span class="ico">${ic('pin', 19)}</span><span class="grow"><b>มุมมองแผนที่เริ่มต้น</b><small>เปิดแผนที่ เลื่อนไปยังพื้นที่ แล้วกด "ตั้งมุมมองนี้เป็นค่าเริ่มต้น"</small></span>${ic('chev', 18, 2.4)}</button>
         ${Store.state.mode === 'demo' ? `<button class="listrow" data-act="resetdemo"><span class="ico off">${ic('trash', 19)}</span><span class="grow"><b>ล้างข้อมูลทดลองทั้งหมด</b><small>ลบข้อมูลที่เก็บในเครื่องนี้</small></span></button>` : ''}
@@ -665,13 +668,14 @@ const ACT = {
   fcat(t) { S.draft.cat_id = S.draft.cat_id == t.dataset.c ? '' : t.dataset.c; $$('[data-act="fcat"]').forEach(b => b.setAttribute('aria-pressed', b.dataset.c == S.draft.cat_id)); },
   gps() { locate((la, ln) => { setFormPin(la, ln, true, true); toast('ปักหมุดตามตำแหน่งปัจจุบันแล้ว'); }); },
   rmphoto(t) { freePhotos(S.draft.photos.splice(+t.dataset.i, 1)); drawFormPhotos(); },
-  async delphoto(t) { await busy(null, async () => { await Store.admin('delete_photo', { p_pin: S.pin, p_id: +t.dataset.id }); drawFormPhotos(); toast('ลบรูปแล้ว'); }); },
+  async delphoto(t) { await busy(null, async () => { await Store.admin('delete_photo', { p_pin: S.pin, p_id: +t.dataset.id }); drawFormPhotos(); toast('ลบรูปแล้ว'); purgeQuiet(); }); },
   /* detail */
   act(t) { actSheet(t.dataset.kind); },
   doact(t) { doAct(t.dataset.kind, t); },
   rmact(t) { freePhotos(S.actPhotos.splice(+t.dataset.i, 1)); drawActPhotos(); },
-  askdelete() { sheet(`<h2>ลบรายการนี้?</h2><p class="muted">รายการจะหายจากหน้าเว็บและรายงานทั้งหมด</p><button class="btn danger block lg" data-act="dodelete">ลบรายการ</button><button class="btn ghost block" data-act="closesheet">ยกเลิก</button>`); },
-  async dodelete(t) { const id = cur.r.id; await busy(t, async () => { await Store.admin('delete_defect', { p_pin: S.pin, p_id: id }); closeSheet(); toast('ลบรายการแล้ว'); go('list', true); }); },
+  askdelete() { sheet(`<h2>ลบรายการนี้?</h2><p class="muted">รายการ รูปภาพ และประวัติทั้งหมดจะถูกลบถาวร <b>กู้คืนไม่ได้</b></p><button class="btn danger block lg" data-act="dodelete">ลบถาวร</button><button class="btn ghost block" data-act="closesheet">ยกเลิก</button>`); },
+  async dodelete(t) { const id = cur.r.id; await busy(t, async () => { await Store.admin('delete_defect', { p_pin: S.pin, p_id: id }); closeSheet(); toast('ลบรายการแล้ว'); go('list', true); purgeQuiet(); }); },
+  async purge(t) { await busy(t, async () => { const n = await Store.purgeFiles(S.pin); toast(n ? `ลบไฟล์รูปที่ไม่ใช้แล้ว ${n} ไฟล์` : 'ไม่มีไฟล์รูปค้างอยู่'); }); },
   closesheet() { closeSheet(); },
   /* export */
   expst(t) { const s = t.dataset.s, L = S.exp.status; S.exp.status = L.includes(s) ? L.filter(x => x !== s) : ORDER.filter(x => L.includes(x) || x === s); t.setAttribute('aria-pressed', S.exp.status.includes(s)); drawExport(); },
