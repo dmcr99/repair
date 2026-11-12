@@ -111,6 +111,27 @@ async function decodeImage(blob) {
   }
 }
 // คืนหน่วยความจำของรูปตัวอย่างที่ไม่ใช้แล้ว
+/* ---------- LINE add-friend ---------- */
+const QR_LIB = 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';
+function lineUrl() {
+  const id = String(CFG.LINE_ID || '').trim().replace(/^@?/, '@');
+  return /^@[\w.-]+$/.test(id) ? 'https://line.me/R/ti/p/' + id : '';
+}
+function lineCard(inSheet) {
+  const u = lineUrl(); if (!u) return '';
+  return `<div class="linecard"><a class="qr" href="${u}" target="_blank" rel="noopener" aria-label="QR เพิ่มเพื่อน LINE" data-qr="${u}"></a>
+    <div><h3>รับแจ้งเตือนงานซ่อมทางไลน์</h3><p>เพิ่มเพื่อนบัญชีแจ้งเตือน แล้วจะได้รับรายการแจ้งซ่อมใหม่ทางไลน์ทันที พร้อมรูปและลิงก์ไปที่รายการ</p>
+    <a class="btn line" href="${u}" target="_blank" rel="noopener">${ic('plus', 18, 2.6)} เพิ่มเพื่อนใน LINE</a>
+    ${inSheet ? '' : `<button class="link hideline" data-act="hideline">เพิ่มเพื่อนแล้ว ซ่อนการ์ดนี้</button>`}</div></div>`;
+}
+async function drawQR() {
+  const els = $$('[data-qr]'); if (!els.length) return;
+  try {
+    if (!window.qrcode) await loadScript(QR_LIB);
+    els.forEach(el => { const q = qrcode(0, 'M'); q.addData(el.dataset.qr); q.make(); el.innerHTML = q.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); });
+  } catch (e) { els.forEach(el => { el.hidden = true; }); }   // ไม่มีเน็ตโหลด QR ก็ยังกดปุ่มได้
+}
+
 // ลบไฟล์รูปที่เพิ่งลบออกจากที่เก็บรูปเบื้องหลัง ถ้าไม่สำเร็จ ไฟล์ยังอยู่ในถังขยะ กด "เก็บกวาดไฟล์รูป" ภายหลังได้
 function purgeQuiet() { Store.purgeFiles(S.pin).catch(e => console.warn('ลบไฟล์รูปไม่สำเร็จ', e)); }
 function freePhotos(arr) { (arr || []).forEach(p => { if (p && p.url && p.url.startsWith('blob:')) URL.revokeObjectURL(p.url); }); }
@@ -240,13 +261,15 @@ VIEWS.home = {
         </div>
         <div class="ring" title="งานที่เสร็จแล้ว"><svg viewBox="0 0 92 92"><circle class="bg" cx="46" cy="46" r="38"/><circle class="fg" cx="46" cy="46" r="38" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${C.toFixed(1)}" data-off="${(C * (1 - pct / 100)).toFixed(1)}"/></svg><div><b><span data-count="${pct}">0</span>%</b><small>เสร็จแล้ว</small></div></div>
       </div>
+      ${tech && LS.get('line_hidden') !== '1' ? lineCard(false) : ''}
       <div class="stats">${ORDER.map(k => `<button class="stat s-${k}" data-act="go" data-to="list" data-f="${k}"><b data-count="${cnt(k)}">0</b><span>${ST[k].t}</span></button>`).join('')}</div>
       <div class="sec-h"><h2>${tech ? 'งานที่ต้องทำ' : 'รอตรวจรับ'}</h2>${mine.length > 3 ? `<button class="link" data-act="go" data-to="list" data-f="${tech ? 'new' : 'review'}">ดูทั้งหมด ${ic('chev', 15, 2.4)}</button>` : ''}</div>
       ${mine.length ? `<div class="items">${mine.slice(0, 3).map(itemRow).join('')}</div>` : `<div class="empty">${ic('check', 28, 2.4)}<b>${tech ? 'ไม่มีงานค้าง' : 'ไม่มีงานรอตรวจรับ'}</b><span>${tech ? 'เมื่อมีการแจ้งรายการใหม่จะแสดงที่นี่' : 'เมื่อช่างแก้ไขเสร็จ รายการจะแสดงที่นี่ให้ตรวจรับ'}</span></div>`}
       <div class="sec-h"><h2>แจ้งล่าสุด</h2>${total > 4 ? `<button class="link" data-act="go" data-to="list" data-f="all">ดูทั้งหมด ${ic('chev', 15, 2.4)}</button>` : ''}</div>
       ${total ? `<div class="items">${all.slice(0, 4).map(itemRow).join('')}</div>` : `<div class="empty">${ic('cam', 28)}<b>ยังไม่มีรายการ</b><span>กดปุ่ม "แจ้งซ่อม" เพื่อเริ่มแจ้งรายการแรก</span></div>`}
     </main>`;
-  }
+  },
+  mount() { drawQR(); }
 };
 
 function filtered() {
@@ -595,7 +618,8 @@ function pinSheet() {
 }
 function roleSheet() {
   const o = (role, icn, t, s) => `<button class="opt" data-act="role" data-role="${role}" aria-current="${!isAdmin() && S.role === role}"><span class="ico">${ic(icn, 22)}</span><span><b>${t}</b><small>${s}</small></span>${!isAdmin() && S.role === role ? ic('check', 20, 2.6) : ''}</button>`;
-  sheet(`<h2>เปลี่ยนบทบาท</h2>${o('reporter', 'mega', 'ผู้แจ้ง', 'แจ้งจุดชำรุด และตรวจรับงาน')}${o('tech', 'wrench', 'ช่าง', 'รับงาน อัปเดตสถานะ แนบรูปหลังแก้ไข')}
+  const lineOpt = S.role === 'tech' && lineUrl() ? `<button class="opt" data-act="linesheet"><span class="ico" style="color:#06C755">${ic('mega', 22)}</span><span><b>รับแจ้งเตือนทางไลน์</b><small>QR เพิ่มเพื่อนบัญชีแจ้งเตือนงานซ่อม</small></span>${ic('chev', 20, 2.4)}</button>` : '';
+  sheet(`<h2>เปลี่ยนบทบาท</h2>${o('reporter', 'mega', 'ผู้แจ้ง', 'แจ้งจุดชำรุด และตรวจรับงาน')}${o('tech', 'wrench', 'ช่าง', 'รับงาน อัปเดตสถานะ แนบรูปหลังแก้ไข')}${lineOpt}
     ${isAdmin() ? `<button class="opt" data-act="go" data-to="admin" aria-current="true"><span class="ico">${ic('gear', 22)}</span><span><b>ตั้งค่าระบบ</b><small>กำลังใช้งานในโหมดผู้ดูแล</small></span>${ic('chev', 20, 2.4)}</button><button class="btn ghost block" data-act="adminout">ออกจากโหมดผู้ดูแล</button>`
       : `<button class="opt" data-act="pin"><span class="ico">${ic('lock', 22)}</span><span><b>ผู้ดูแลระบบ</b><small>ใช้รหัสเพื่อแก้ไข ลบ และตั้งค่า</small></span>${ic('chev', 20, 2.4)}</button>`}`);
 }
@@ -652,6 +676,8 @@ const ACT = {
   role(t) { S.role = t.dataset.role; LS.set('role', S.role); if (isAdmin()) { S.pin = ''; SS.set('pin', ''); } closeSheet(); const h = route().name; (h === 'home' || !location.hash) ? render(true) : render(true); },
   pin() { pinSheet(); },
   rolesheet() { roleSheet(); },
+  linesheet() { sheet(lineCard(true)); drawQR(); },
+  hideline() { LS.set('line_hidden', '1'); render(false); toast('ซ่อนแล้ว เปิดดู QR ได้อีกจากป้าย "ช่าง" มุมขวาบน'); },
   adminout() { S.pin = ''; SS.set('pin', ''); closeSheet(); toast('ออกจากโหมดผู้ดูแลแล้ว'); route().name === 'admin' || route().name === 'edit' ? go('home') : render(false); },
   retry() { location.reload(); },
   go(t) { if (t.dataset.f) S.filter.status = t.dataset.f; closeSheet(); go(t.dataset.to); },
